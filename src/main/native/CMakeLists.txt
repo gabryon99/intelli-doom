@@ -5,10 +5,7 @@ project(kdoomgeneric)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find JNI package
 find_package(JNI REQUIRED)
-
-# Include JNI headers
 include_directories(${JNI_INCLUDE_DIRS})
 
 set(SOURCE_FILES src/kdoomgeneric.cpp)
@@ -21,7 +18,7 @@ target_link_libraries(
         ${PROJECT_NAME}
         PRIVATE
         ${JNI_LIBRARIES}
-        "/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/native/libraries/doomgeneric/doomgeneric/libdoomgeneric.a"
+        "libraries/doomgeneric/doomgeneric/libdoomgeneric.a"
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

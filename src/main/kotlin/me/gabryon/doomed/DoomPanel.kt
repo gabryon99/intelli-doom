@@ -1,8 +1,9 @@
 package me.gabryon.doomed
 
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.UIUtil
-import org.intellij.markdown.lexer.pop
 import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
@@ -14,6 +15,7 @@ import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.*
 import javax.swing.JPanel
 import javax.swing.Timer
 import kotlin.concurrent.thread
@@ -38,16 +40,40 @@ import kotlin.math.min
 // DOOMGENERIC_RESX
 // DOOMGENERIC_RESX
 
-private const val DOOMGENERIC_RESX = 640
-private const val DOOMGENERIC_RESY = 400
+/**
+ * Constants and configurations for the Doom game panel.
+ */
+private object DoomConfig {
+    const val SCREEN_WIDTH = 640
+    const val SCREEN_HEIGHT = 400
+    const val TARGET_FPS = 60
+    const val NATIVE_LIB_PATH = "/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/native/cmake-build-debug/libkdoomgeneric.dylib"
+    const val WAD_FILE_PATH = "/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/resources/doom1.wad"
+}
 
+/**
+ * Represents a key event in the game's input queue.
+ */
 sealed interface QueueKeyEvent {
     val keyCode: Int
+
+    /**
+     * Represents a key press event.
+     * @property keyCode The key code of the pressed key
+     */
     data class Pressed(override val keyCode: Int) : QueueKeyEvent
+
+    /**
+     * Represents a key release event.
+     * @property keyCode The key code of the released key
+     */
     data class Released(override val keyCode: Int) : QueueKeyEvent
 }
 
-val KeyCodeToDoomKey = mapOf<Int, Int>(
+/**
+ * Mapping of Java KeyEvent codes to Doom-specific key codes.
+ */
+private val KeyCodeToDoomKey = mapOf<Int, Int>(
     KeyEvent.VK_ENTER to 13,
     KeyEvent.VK_ESCAPE to 27,
     KeyEvent.VK_LEFT to 0xac,
@@ -77,79 +103,146 @@ val KeyCodeToDoomKey = mapOf<Int, Int>(
     KeyEvent.VK_MINUS to 0x2d,
 )
 
-class DoomPanel : JPanel(), DoomGeneric {
+/**
+ * Main panel for rendering the Doom game interface.
+ * This panel handles the game rendering, input processing, and communication with the native Doom engine.
+ * The panel maintains a frame buffer for rendering and processes keyboard input events.
+ *
+ * Thread Safety: This implementation is thread-safe, using synchronized collections and proper synchronization
+ * for shared resources like the frame buffer and input queue.
+ */
+class DoomPanel : JPanel(), DoomGeneric, Disposable {
 
     companion object {
-        val START_TICKS = System.currentTimeMillis()
+        private val START_TICKS = System.currentTimeMillis()
+        private val LOG = DoomPanel.thisLogger()
+
         init {
-            System.load("/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/native/cmake-build-debug/libkdoomgeneric.dylib")
+            try {
+                System.load(DoomConfig.NATIVE_LIB_PATH)
+            } catch (e: UnsatisfiedLinkError) {
+                throw RuntimeException("Failed to load native Doom library. ", e)
+            }
         }
     }
 
+    // Performance Note: Using BufferedImage for direct pixel manipulation
     private val frameBuffer: BufferedImage
     private val gameThread: Thread
-    private val pixels = IntArray(DOOMGENERIC_RESX * DOOMGENERIC_RESY)
 
-    private val inputQueue = ArrayList<QueueKeyEvent>()
+    // Performance Note: Using primitive array for better performance in pixel manipulation
+    private val pixels = IntArray(DoomConfig.SCREEN_WIDTH * DoomConfig.SCREEN_HEIGHT)
 
-    lateinit var doomTitle: String
+    // Thread-safe queue for keyboard events
+    private val inputQueue = Collections.synchronizedList(ArrayList<QueueKeyEvent>())
+
+    private var doomTitle: String = "<unknown>"
+        private set  // Protect the title from external modifications
 
     init {
-        isFocusable = true
-        requestFocusInWindow() // Request initial focus
+        try {
+            isFocusable = true
+            requestFocusInWindow() // Request initial focus
 
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent?) {
-                requestFocusInWindow() // Request focus when clicked
-            }
-        })
-        preferredSize = Dimension(DOOMGENERIC_RESX * 2, DOOMGENERIC_RESY * 2)
-        minimumSize = Dimension(DOOMGENERIC_RESX, DOOMGENERIC_RESY)
-        frameBuffer = UIUtil.createImage(this,
-            DOOMGENERIC_RESX,
-            DOOMGENERIC_RESY,
-            BufferedImage.TYPE_INT_ARGB
-        )
+            // Ensure focus is regained when clicked
+            addMouseListener(object : MouseAdapter() {
+                override fun mouseClicked(e: MouseEvent?) {
+                    requestFocusInWindow()
+                }
+            })
 
-        gameThread = thread(start = true) {
-            Thread.currentThread().name = "GameThread"
-            create(3, listOf(
-                "kdoom",
-                "-iwad", "/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/resources/doom1.wad"))
-            while (!Thread.currentThread().isInterrupted) {
-                tick()
+            // Configure panel dimensions
+            preferredSize = Dimension(DoomConfig.SCREEN_WIDTH * 2, DoomConfig.SCREEN_HEIGHT * 2)
+            minimumSize = Dimension(DoomConfig.SCREEN_WIDTH, DoomConfig.SCREEN_HEIGHT)
+
+            // Initialize frame buffer
+            // Performance Note: Using TYPE_INT_ARGB for optimal rendering performance
+            frameBuffer = UIUtil.createImage(
+                this,
+                DoomConfig.SCREEN_WIDTH,
+                DoomConfig.SCREEN_HEIGHT,
+                BufferedImage.TYPE_INT_ARGB
+            )
+
+            // Start game thread
+            gameThread = thread(start = true) {
+                Thread.currentThread().name = "GameThread"
+                create(
+                    3, listOf(
+                        "kdoom",
+                        "-iwad", DoomConfig.WAD_FILE_PATH
+                    )
+                )
+                while (!Thread.currentThread().isInterrupted) {
+                    tick()
+                }
             }
+
+            // Set up keyboard input handling
+            addKeyListener(object : KeyAdapter() {
+                override fun keyPressed(e: KeyEvent?) {
+                    super.keyPressed(e)
+                    e?.let {
+                        // Note: Checking for escape key but not handling it specially
+                        e.keyCode == KeyEvent.VK_ESCAPE
+                        inputQueue.add(QueueKeyEvent.Pressed(e.keyCode))
+                    }
+                }
+
+                override fun keyReleased(e: KeyEvent?) {
+                    super.keyReleased(e)
+                    e?.let {
+                        inputQueue.add(QueueKeyEvent.Released(e.keyCode))
+                    }
+                }
+            })
+
+            // Set up render timer
+            // Performance Note: Using fixed time step for consistent frame rate
+            val renderTimer = Timer(1000 / DoomConfig.TARGET_FPS) { _ -> repaint() }
+            renderTimer.start()
+        } catch (e: Exception) {
+            throw RuntimeException("Failed to initialize Doom panel", e)
         }
-
-        addKeyListener(object : KeyAdapter() {
-            override fun keyPressed(e: KeyEvent?) {
-                super.keyPressed(e)
-                e?.let {
-                    e.keyCode == KeyEvent.VK_ESCAPE
-                    inputQueue.add(QueueKeyEvent.Pressed(e.keyCode))
-                }
-            }
-            override fun keyReleased(e: KeyEvent?) {
-                super.keyReleased(e)
-                e?.let {
-                    inputQueue.add(QueueKeyEvent.Released(e.keyCode))
-                }
-            }
-        })
-
-        val renderTimer: Timer = Timer(1000 / 60) { e -> repaint() }
-        renderTimer.start()
     }
 
+    /**
+     * Creates and initializes the Doom game engine with the specified arguments.
+     * This is a native method implemented in the Doom engine.
+     *
+     * @param argc Number of command line arguments
+     * @param argv List of command line arguments
+     */
     external override fun create(argc: Int, argv: List<String>)
 
+    /**
+     * Performs a single tick of the game engine.
+     * This is a native method that updates the game state.
+     */
     external override fun tick()
 
+    /**
+     * Initializes the game panel components.
+     * Called by the native code during engine initialization.
+     */
     override fun init() {
-        println("initializing the game....")
+        LOG.info("i nitializing the Doom game engine...")
     }
 
+    /**
+     * Renders a single frame of the game.
+     * This method handles color format conversion and synchronized frame buffer updates.
+     *
+     * @param screenBuffer Buffer containing the raw frame data from the engine
+     */
     override fun drawFrame(screenBuffer: ByteBuffer) {
+        /**
+         * Converts RGB color format to ARGB format.
+         * Performance Note: This conversion is necessary for Java's BufferedImage format,
+         * but it does introduce some overhead.
+         *
+         * @return The color in ARGB format
+         */
         fun Int.swizzleColor(): Int {
             val r = (this shr 16) and 0xff
             val g = (this shr 8) and 0xff
@@ -158,67 +251,127 @@ class DoomPanel : JPanel(), DoomGeneric {
         }
 
         synchronized(frameBuffer) {
-            screenBuffer.order(ByteOrder.LITTLE_ENDIAN)
-            screenBuffer.asIntBuffer().get(pixels)
+            try {
+                screenBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                screenBuffer.asIntBuffer().get(pixels)
 
-            for (i in pixels.indices) {
-                pixels[i] = pixels[i].swizzleColor()
+                for (i in pixels.indices) {
+                    pixels[i] = pixels[i].swizzleColor()
+                }
+
+                frameBuffer.setRGB(
+                    0, 0,
+                    DoomConfig.SCREEN_WIDTH, DoomConfig.SCREEN_HEIGHT,
+                    pixels, 0, DoomConfig.SCREEN_WIDTH
+                )
+            } catch (e: Exception) {
+                LOG.error("failed to render frame: ${e.message}")
             }
-
-            frameBuffer.setRGB(
-                0, 0,
-                DOOMGENERIC_RESX, DOOMGENERIC_RESY,
-                pixels, 0, DOOMGENERIC_RESX
-            )
         }
     }
 
+    /**
+     * Suspends the current thread for the specified duration.
+     * Used by the engine for timing control.
+     *
+     * @param ms Duration to sleep in milliseconds
+     */
     override fun sleepMs(ms: Long) {
-        println("[info::${Thread.currentThread().name}] Sleeping for $ms ms")
-        Thread.sleep(ms)
+        try {
+            Thread.sleep(ms)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            LOG.warn("sleep interrupted in thread ${Thread.currentThread().name}")
+        }
     }
 
+    /**
+     * Returns the number of milliseconds since the game started.
+     * Used by the engine for timing and animation.
+     *
+     * @return Elapsed time in milliseconds
+     */
     override fun getTickMs(): Long =
         System.currentTimeMillis() - START_TICKS
 
+    /**
+     * Processes and returns the next key event from the input queue.
+     * Performance Note: This method is called frequently by the engine,
+     * so we use efficient bit operations for key code conversion.
+     *
+     * @return Encoded key event data or 0 if no event is available
+     */
     override fun getKey(): Int {
         if (inputQueue.isEmpty()) return 0
-        val key = inputQueue.pop()
-        val pressed = when (key) {
+
+        val event = inputQueue.removeAt(0)
+        val pressed = when (event) {
             is QueueKeyEvent.Pressed -> 1
             is QueueKeyEvent.Released -> 0
         }
-        val keyData = (pressed shl 8) or (KeyCodeToDoomKey[key.keyCode] ?: Character.toChars(key.keyCode)[0].lowercase().toInt())
-        return keyData
+
+        val doomKeyCode = KeyCodeToDoomKey[event.keyCode]
+            ?: event.keyCode.toChar().lowercase().first().code
+
+        return (pressed shl 8) or doomKeyCode
     }
 
-    // Do nothing, we are inside IntelliJ
+    /**
+     * Updates the game window title.
+     * Note: This implementation is minimal as we're running inside IntelliJ.
+     *
+     * @param title New window title
+     */
     override fun setWindowTitle(title: String) {
-        println("[info] :: set title = $title")
         doomTitle = title
     }
 
+    /**
+     * Renders the game frame to the panel.
+     * This method handles scaling and centering of the game frame to maintain aspect ratio.
+     * Performance Note: Uses nearest-neighbor interpolation for crisp pixel art rendering.
+     *
+     * @param g The graphics context to paint on
+     */
     override fun paintComponent(g: Graphics?) {
         super.paintComponent(g)
 
-        val g2d = g as Graphics2D
-        g2d.setRenderingHint(
-            RenderingHints.KEY_INTERPOLATION,
-            RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
-        )
-        val scale = min(
-            getWidth() / DOOMGENERIC_RESX.toDouble(),
-            getHeight() / DOOMGENERIC_RESY.toDouble()
-        )
+        if (g == null) return
 
-        val scaledWidth = (DOOMGENERIC_RESX * scale).toInt()
-        val scaledHeight = (DOOMGENERIC_RESY * scale).toInt()
-        val x = (getWidth() - scaledWidth) / 2
-        val y = (getHeight() - scaledHeight) / 2
+        try {
+            val g2d = g as Graphics2D
+            // Use nearest-neighbor interpolation for crisp pixel art
+            g2d.setRenderingHint(
+                RenderingHints.KEY_INTERPOLATION,
+                RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR
+            )
 
-        synchronized(frameBuffer) {
-            g2d.background = JBColor.BLACK
-            g2d.drawImage(frameBuffer, x, y, scaledWidth, scaledHeight, null)
+            // Calculate scaling to maintain aspect ratio
+            val scale = min(
+                getWidth() / DoomConfig.SCREEN_WIDTH.toDouble(),
+                getHeight() / DoomConfig.SCREEN_HEIGHT.toDouble()
+            )
+
+            // Calculate dimensions for centered rendering
+            val scaledWidth = (DoomConfig.SCREEN_WIDTH * scale).toInt()
+            val scaledHeight = (DoomConfig.SCREEN_HEIGHT * scale).toInt()
+            val x = (getWidth() - scaledWidth) / 2
+            val y = (getHeight() - scaledHeight) / 2
+
+            synchronized(frameBuffer) {
+                // Set background color and draw the scaled frame
+                g2d.background = JBColor.BLACK
+                g2d.drawImage(frameBuffer, x, y, scaledWidth, scaledHeight, null)
+            }
+        } catch (e: Exception) {
+            LOG.error("failed to paint component: ${e.message}")
+            g.color = JBColor.RED
+            g.drawString("Error rendering game frame", 10, 20)
         }
+    }
+
+    override fun dispose() {
+        // Send interrupting request to the game loop
+        gameThread.interrupt()
     }
 }
