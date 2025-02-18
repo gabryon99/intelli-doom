@@ -44,4 +44,51 @@ tasks {
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN"))
     }
+
+    register<Exec>("compileDoomGeneric") {
+        workingDir = file("src/main/native/libraries/doomgeneric/doomgeneric")
+        commandLine = listOf("make")
+    }
+
+    register<Exec>("compileKDoomGeneric") {
+        dependsOn("compileDoomGeneric")
+
+        workingDir = file("src/main/native/")
+        commandLine("bash", "-c", """
+            set -e
+            mkdir -p cmake-build-debug
+            cd cmake-build-debug
+            cmake ..
+            cmake --build .
+        """.trimIndent())
+    }
+
+    register<Copy>("moveKDoomGenericToResources") {
+        dependsOn("compileKDoomGeneric")
+
+        val osName = System.getProperty("os.name").lowercase()
+        val osArch = System.getProperty("os.arch").lowercase()
+        val platformDir = when {
+            osName.contains("mac") -> {
+                when {
+                    osArch.contains("aarch64") -> "macos-aarch64"
+                    else -> "macos-x86_64"
+                }
+            }
+            osName.contains("linux") -> "linux-x64"
+            osName.contains("windows") -> "windows-x64"
+            else -> throw GradleException("Unsupported platform: $osName")
+        }
+
+        description = "Copy the shared library in resources folder"
+        from("src/main/native/cmake-build-debug/") {
+            include("libkdoomgeneric.dylib")
+        }
+        into("src/main/resources/native/$platformDir")
+    }
+
+    processResources {
+        dependsOn("moveKDoomGenericToResources")
+    }
+
 }

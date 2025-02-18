@@ -18,7 +18,7 @@ target_link_libraries(
         ${PROJECT_NAME}
         PRIVATE
         ${JNI_LIBRARIES}
-        "libraries/doomgeneric/doomgeneric/libdoomgeneric.a"
+        ${CMAKE_CURRENT_SOURCE_DIR}/libraries/doomgeneric/doomgeneric/libdoomgeneric.a
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

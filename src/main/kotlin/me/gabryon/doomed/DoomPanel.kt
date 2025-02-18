@@ -47,8 +47,6 @@ private object DoomConfig {
     const val SCREEN_WIDTH = 640
     const val SCREEN_HEIGHT = 400
     const val TARGET_FPS = 60
-    const val NATIVE_LIB_PATH = "/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/native/cmake-build-debug/libkdoomgeneric.dylib"
-    const val WAD_FILE_PATH = "/Users/Gabriele.Pappalardo/hack/Kotlin/doomed/src/main/resources/doom1.wad"
 }
 
 /**
@@ -118,11 +116,7 @@ class DoomPanel : JPanel(), DoomGeneric, Disposable {
         private val LOG = DoomPanel.thisLogger()
 
         init {
-            try {
-                System.load(DoomConfig.NATIVE_LIB_PATH)
-            } catch (e: UnsatisfiedLinkError) {
-                throw RuntimeException("Failed to load native Doom library. ", e)
-            }
+            NativeLibraryLoader.loadLibraryFromResources()
         }
     }
 
@@ -170,7 +164,7 @@ class DoomPanel : JPanel(), DoomGeneric, Disposable {
                 create(
                     3, listOf(
                         "kdoom",
-                        "-iwad", DoomConfig.WAD_FILE_PATH
+                        "-iwad", NativeLibraryLoader.loadWadFile()
                     )
                 )
                 while (!Thread.currentThread().isInterrupted) {
